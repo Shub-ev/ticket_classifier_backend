@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.idea/
+models/*.txt
 data/assigned_tickets.json
 data/human_review_queue.json
