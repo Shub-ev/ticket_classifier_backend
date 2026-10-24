@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+.venv/
+data/assigned_tickets.json
+data/human_review_queue.json
