@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from utils import TicketRequest, HumanReviewAssignment
+from utils import TicketRequest, HumanReviewAssignment, AssignedTicketRejection
 from helper_functions import (
     assign_human_review_ticket,
     get_assignment_groups,
@@ -7,6 +7,8 @@ from helper_functions import (
     get_human_review_queue,
     get_meta_data,
     predict_ticket_details,
+    reject_assigned_ticket,
+    reject_human_review_ticket,
     update_classifier_model_accuracy,
 )
 from pathlib import Path
@@ -116,9 +118,25 @@ def assign_human_review_ticket_endpoint(assignment: HumanReviewAssignment):
     return {"message": "Ticket assigned successfully", "ticket": ticket}
 
 
+@triage_router.post("/human_review/reject")
+def reject_human_review_ticket_endpoint(rejection: AssignedTicketRejection):
+    ticket = reject_human_review_ticket(rejection.id, rejection.reason)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found in human review queue")
+    return {"message": "Ticket rejected successfully", "ticket": ticket}
+
+
 @triage_router.get("/assigned")
 def get_assigned_tickets_endpoint():
     return get_assigned_tickets()
+
+
+@triage_router.post("/assigned/reject")
+def reject_assigned_ticket_endpoint(rejection: AssignedTicketRejection):
+    ticket = reject_assigned_ticket(rejection.id, rejection.reason)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found in assigned tickets")
+    return {"message": "Ticket rejected successfully", "ticket": ticket}
 
 
 @triage_router.get("/assignment_groups")

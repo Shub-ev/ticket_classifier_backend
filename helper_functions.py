@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import joblib
 import json
+import csv
 from uuid import uuid4
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -11,13 +12,23 @@ print("##### BASE PATH: ", BASE_DIR)
 TEST_FILE = DATA_DIR / "test_tickets.json"
 HUMAN_REVIEW_FILE = DATA_DIR / "human_review_queue.json"
 ASSIGNED_TICKETS_FILE = DATA_DIR / "assigned_tickets.json"
+REJECTED_TICKETS_FILE = DATA_DIR / "rejected_tickets.json"
 ASSIGNMENT_GROUPS_FILE = DATA_DIR / "assignment_groups.json"
 META_DATA_FILE = DATA_DIR / "meta_data.json"
+HUMAN_REVIEW_TRAINING_FILE = DATA_DIR / "human_review_training.csv"
 HUMAN_REVIEW_THRESHOLD = 80.0
 
 model = joblib.load(BASE_DIR / "models" / "tfidf_classifier.pkl")
 vectorizer = joblib.load(BASE_DIR / "models" / "tfidf_vectorizer.pkl")
+relevance_model = joblib.load(BASE_DIR / "models" / "relevance_classifier.pkl")
 
+
+def predict_ticket_relevance(text: str):
+    prediction = relevance_model.predict([text])[0]
+    probabilities = relevance_model.predict_proba([text])[0]
+    class_probabilities = dict(zip(relevance_model.classes_, probabilities))
+
+    return prediction, round(float(class_probabilities[prediction] * 100), 2)
 
 
 def predict_ticket_details(
@@ -25,6 +36,29 @@ def predict_ticket_details(
     save_for_review: bool = False,
     save_assignment: bool = False,
 ):
+    relevance_prediction, relevance_confidence = predict_ticket_relevance(text)
+
+    if relevance_prediction != "YES":
+        response = {
+            "predicted_group": "Human Review",
+            "confidence": 0.0,
+            "human_review_required": True,
+            "reason": "Relevance classifier marked this ticket as out of scope",
+            "relevance_prediction": relevance_prediction,
+            "relevance_confidence": relevance_confidence,
+            "top_predictions": [],
+        }
+
+        if save_for_review:
+            ticket = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "text": text,
+                **response,
+            }
+            ticket["id"] = add_to_human_review(ticket)
+            response["id"] = ticket["id"]
+
+        return response
 
     tokens = text.lower().split()
 
@@ -56,6 +90,8 @@ def predict_ticket_details(
             "confidence": 0.0,
             "human_review_required": True,
             "reason": "No known vocabulary terms found in training data",
+            "relevance_prediction": relevance_prediction,
+            "relevance_confidence": relevance_confidence,
             "top_predictions": []
         }
 
@@ -115,6 +151,8 @@ def predict_ticket_details(
         "confidence": confidence,
         "vocabulary_coverage": round(coverage * 100, 2),
         "human_review_required": human_review_required,
+        "relevance_prediction": relevance_prediction,
+        "relevance_confidence": relevance_confidence,
         "top_predictions": [
             {
                 "group": group,
@@ -199,18 +237,106 @@ def save_assigned_ticket(ticket):
         _store_assignment_group(ticket["assignment_group"])
 
 
+def save_human_review_training_example(text: str, assignment_group: str):
+    file_exists = HUMAN_REVIEW_TRAINING_FILE.exists()
+    write_header = not file_exists or HUMAN_REVIEW_TRAINING_FILE.stat().st_size == 0
+
+    with HUMAN_REVIEW_TRAINING_FILE.open("a", newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=["text", "Assignment Group"])
+        if write_header:
+            writer.writeheader()
+        writer.writerow({
+            "text": text,
+            "Assignment Group": assignment_group,
+        })
+
+
 def get_assigned_tickets():
     return _read_json_array(ASSIGNED_TICKETS_FILE)
 
 
-def get_meta_data():
-    if not META_DATA_FILE.exists():
-        return {}
+def reject_assigned_ticket(ticket_id: str, reason: str | None = None):
+    assigned_tickets = _read_json_array(ASSIGNED_TICKETS_FILE)
+    ticket_index = next(
+        (index for index, ticket in enumerate(assigned_tickets) if ticket.get("id") == ticket_id),
+        None,
+    )
+    if ticket_index is None:
+        return None
 
-    with META_DATA_FILE.open("r", encoding="utf-8") as file:
-        metadata = json.load(file)
-    if not isinstance(metadata, dict):
-        raise ValueError(f"Expected a JSON object in {META_DATA_FILE}")
+    ticket = assigned_tickets.pop(ticket_index)
+    ticket.pop("assignment_group", None)
+    ticket.pop("assigned_at", None)
+    ticket.pop("assigned_by", None)
+    ticket.update({
+        "status": "rejected",
+        "rejected_at": datetime.now(timezone.utc).isoformat(),
+        "rejected_by": "client",
+    })
+    if reason and reason.strip():
+        ticket["rejection_reason"] = reason.strip()
+
+    rejected_tickets = _read_json_array(REJECTED_TICKETS_FILE)
+    rejected_tickets.append(ticket)
+    _write_json_array(REJECTED_TICKETS_FILE, rejected_tickets)
+    _write_json_array(ASSIGNED_TICKETS_FILE, assigned_tickets)
+    return ticket
+
+
+def reject_human_review_ticket(ticket_id: str, reason: str | None = None):
+    queue = get_human_review_queue()
+    ticket_index = next(
+        (index for index, ticket in enumerate(queue) if ticket.get("id") == ticket_id),
+        None,
+    )
+    if ticket_index is None:
+        return None
+
+    ticket = queue.pop(ticket_index)
+    ticket.pop("assignment_group", None)
+    ticket.update({
+        "status": "rejected",
+        "human_review_required": False,
+        "rejected_at": datetime.now(timezone.utc).isoformat(),
+        "rejected_by": "client",
+    })
+    if reason and reason.strip():
+        ticket["rejection_reason"] = reason.strip()
+
+    rejected_tickets = _read_json_array(REJECTED_TICKETS_FILE)
+    rejected_tickets.append(ticket)
+    _write_json_array(REJECTED_TICKETS_FILE, rejected_tickets)
+    _write_json_array(HUMAN_REVIEW_FILE, queue)
+    return ticket
+
+
+def get_meta_data():
+    metadata = {}
+    if META_DATA_FILE.exists():
+        with META_DATA_FILE.open("r", encoding="utf-8") as file:
+            metadata = json.load(file)
+        if not isinstance(metadata, dict):
+            raise ValueError(f"Expected a JSON object in {META_DATA_FILE}")
+
+    if HUMAN_REVIEW_TRAINING_FILE.exists():
+        with HUMAN_REVIEW_TRAINING_FILE.open("r", newline="", encoding="utf-8-sig") as file:
+            training_examples = sum(1 for _ in csv.DictReader(file))
+    else:
+        training_examples = 0
+
+    stored_groups = _read_json_array(ASSIGNMENT_GROUPS_FILE)
+    if any(not isinstance(group, str) for group in stored_groups):
+        raise ValueError(f"Expected assignment group names in {ASSIGNMENT_GROUPS_FILE}")
+    assignment_groups = list(dict.fromkeys(
+        [str(group) for group in model.classes_] + stored_groups
+    ))
+    metadata["ticket_counts"] = {
+        "waiting_for_human_review": len(get_human_review_queue()),
+        "assigned": len(get_assigned_tickets()),
+        "rejected": len(_read_json_array(REJECTED_TICKETS_FILE)),
+        "human_review_training_examples": training_examples,
+    }
+    metadata["assignment_groups"] = assignment_groups
     return metadata
 
 
@@ -270,6 +396,7 @@ def assign_human_review_ticket(ticket_id: str, assignment_group: str):
         "human_review_required": False,
     })
 
+    save_human_review_training_example(ticket.get("text", ""), assignment_group)
     save_assigned_ticket(ticket)
     _write_json_array(HUMAN_REVIEW_FILE, queue)
     return ticket

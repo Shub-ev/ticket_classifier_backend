@@ -7,3 +7,8 @@ class TicketRequest(BaseModel):
 class HumanReviewAssignment(BaseModel):
     id: str
     assignment_group: str
+
+
+class AssignedTicketRejection(BaseModel):
+    id: str
+    reason: str | None = None

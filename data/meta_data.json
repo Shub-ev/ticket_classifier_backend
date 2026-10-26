@@ -1,3 +1,40 @@
 {
-  "classifier_model_accuracy": 95.0
+  "classifier_model_accuracy": 95.0,
+  "models": {
+    "relevance_classifier": {
+      "name": "IT relevance classifier",
+      "positive_label": "YES",
+      "negative_label": "NO",
+      "description": "Checks whether an incoming ticket is in scope before assignment-group classification."
+    },
+    "assignment_group_classifier": {
+      "name": "Assignment group classifier",
+      "minimum_confidence_percent": 80.0,
+      "minimum_vocabulary_coverage_percent": 20.0,
+      "description": "Automatically assigns high-confidence relevant tickets; lower-confidence tickets require human review."
+    }
+  },
+  "ticket_statuses": {
+    "human_review": "Waiting for a human to choose an assignment group.",
+    "assigned": "Assigned to an assignment group.",
+    "rejected": "Rejected by a client and excluded from assignment-group training data."
+  },
+  "client_actions": {
+    "reject_assigned_ticket": {
+      "method": "POST",
+      "endpoint": "/triage/assigned/reject",
+      "request_fields": {
+        "id": "Ticket ID",
+        "reason": "Optional reason for rejection"
+      }
+    },
+    "reject_human_review_ticket": {
+      "method": "POST",
+      "endpoint": "/triage/human_review/reject",
+      "request_fields": {
+        "id": "Ticket ID",
+        "reason": "Optional reason for rejection"
+      }
+    }
+  }
 }
