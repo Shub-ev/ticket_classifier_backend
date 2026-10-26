@@ -1,0 +1,42 @@
+[
+  {
+    "short_description": "90Conf Neat Board 1 - Low Room Health Score (-0.930) Room 90Conf Neat Board 1 requires attention due to low health score. Room health score is below threshold: -0.930 (threshold: 0.8). Automated incident created by DWE monitoring system.",
+    "expected_group": "DWE Remote AV conference Support"
+  },
+  {
+    "short_description": "90Conf EOB 3-3S 4 [Teams Enabled] - Console. No certified console display is detected in the Microsoft Teams conference room. The console device may be powered off or unable to communicate with the room compute device.",
+    "expected_group": "DWE Remote AV conference Support"
+  },
+  {
+    "short_description": "Unable to install SAP GUI 8.0. Installation fails on the corporate laptop, so the user cannot access SAP.",
+    "expected_group": "DWE Remote Support Compute HW_SW"
+  },
+  {
+    "short_description": "Corporate laptop is running slowly and frequently freezes after a recent Windows update.",
+    "expected_group": "DWE Remote Support Compute HW_SW"
+  },
+  {
+    "short_description": "User receives an authentication error when opening Outlook desktop. The mailbox cannot be accessed.",
+    "expected_group": "DWE Remote Support M365"
+  },
+  {
+    "short_description": "OneDrive sync has stopped working and recent files are not uploading to the cloud.",
+    "expected_group": "DWE Remote Support M365"
+  },
+  {
+    "short_description": "Please restore my old OneDrive data from old ID A6SPP6V to my new ID B6DKFVJ.",
+    "expected_group": "Low Volume Support Groups"
+  },
+  {
+    "short_description": "Production URL http://timnet-app2.group.upm.com/kaukas/ is unreachable and monitoring status is DOWN.",
+    "expected_group": "TCS APEX Centre L1 Support"
+  },
+  {
+    "short_description": "Unable to log in to the FOR-IT application.",
+    "expected_group": "TCS Service Desk"
+  },
+  {
+    "short_description": "User account is locked after multiple failed login attempts and needs to be unlocked.",
+    "expected_group": "TCS Service Desk"
+  }
+]

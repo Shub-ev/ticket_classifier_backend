@@ -1,5 +1,12 @@
+"""Ticket inference, triage persistence, and review-queue operations.
+
+The fitted classifiers are loaded once at module import. Ticket outcomes and
+metadata are persisted as JSON arrays under ``data/`` for local development.
+"""
+
 from datetime import datetime, timezone
 from pathlib import Path
+from utils import ASSIGNMENT_GROUPS
 import numpy as np
 import joblib
 import json
@@ -11,9 +18,9 @@ DATA_DIR = BASE_DIR / "data"
 print("##### BASE PATH: ", BASE_DIR)
 TEST_FILE = DATA_DIR / "test_tickets.json"
 HUMAN_REVIEW_FILE = DATA_DIR / "human_review_queue.json"
+LLM_REVIEW_FILE = DATA_DIR / "llm_review_queue.json"
 ASSIGNED_TICKETS_FILE = DATA_DIR / "assigned_tickets.json"
 REJECTED_TICKETS_FILE = DATA_DIR / "rejected_tickets.json"
-ASSIGNMENT_GROUPS_FILE = DATA_DIR / "assignment_groups.json"
 META_DATA_FILE = DATA_DIR / "meta_data.json"
 HUMAN_REVIEW_TRAINING_FILE = DATA_DIR / "human_review_training.csv"
 HUMAN_REVIEW_THRESHOLD = 80.0
@@ -24,6 +31,15 @@ relevance_model = joblib.load(BASE_DIR / "models" / "relevance_classifier.pkl")
 
 
 def predict_ticket_relevance(text: str):
+    """Predict whether a ticket is in IT scope and return its confidence.
+
+    Args:
+        text: Ticket description to evaluate.
+
+    Returns:
+        A tuple containing the predicted ``YES``/``NO`` label and confidence
+        as a percentage.
+    """
     prediction = relevance_model.predict([text])[0]
     probabilities = relevance_model.predict_proba([text])[0]
     class_probabilities = dict(zip(relevance_model.classes_, probabilities))
@@ -36,6 +52,20 @@ def predict_ticket_details(
     save_for_review: bool = False,
     save_assignment: bool = False,
 ):
+    """Classify a ticket and optionally persist its resulting workflow state.
+
+    Relevant tickets are evaluated by the assignment-group model. Cases below
+    its confidence or vocabulary-coverage thresholds are routed through the
+    LLM review flow when ``save_for_review`` is enabled.
+
+    Args:
+        text: Ticket description.
+        save_for_review: Submit uncertain tickets for LLM triage.
+        save_assignment: Persist confident model assignments.
+
+    Returns:
+        A prediction payload including confidence, relevance, and group hints.
+    """
     relevance_prediction, relevance_confidence = predict_ticket_relevance(text)
 
     if relevance_prediction != "YES":
@@ -55,8 +85,7 @@ def predict_ticket_details(
                 "text": text,
                 **response,
             }
-            ticket["id"] = add_to_human_review(ticket)
-            response["id"] = ticket["id"]
+            response.update(_submit_to_llm_review(ticket))
 
         return response
 
@@ -101,8 +130,7 @@ def predict_ticket_details(
                 "text": text,
                 **response
             }
-            ticket["id"] = add_to_human_review(ticket)
-            response["id"] = ticket["id"]
+            response.update(_submit_to_llm_review(ticket))
 
         return response
 
@@ -168,8 +196,7 @@ def predict_ticket_details(
             "text": text,
             **response
         }
-        ticket["id"] = add_to_human_review(ticket)
-        response["id"] = ticket["id"]
+        response.update(_submit_to_llm_review(ticket))
     elif save_assignment and not human_review_required:
         ticket_id = str(uuid4())
         response["id"] = ticket_id
@@ -188,6 +215,11 @@ def predict_ticket_details(
 
 
 def _read_json_array(file_path: Path):
+    """Read a JSON array, returning an empty list when the file is absent.
+
+    Raises:
+        ValueError: If the file exists but does not contain a JSON array.
+    """
     if not file_path.exists():
         return []
 
@@ -199,11 +231,13 @@ def _read_json_array(file_path: Path):
 
 
 def _write_json_array(file_path: Path, data):
+    """Persist a JSON-compatible list to ``file_path`` with readable spacing."""
     with file_path.open("w", encoding="utf-8") as file:
         json.dump(data, file, indent=4)
 
 
 def get_human_review_queue():
+    """Return human-review tickets and repair missing or duplicate IDs."""
     queue = _read_json_array(HUMAN_REVIEW_FILE)
     ids = set()
     changed = False
@@ -220,24 +254,130 @@ def get_human_review_queue():
     return queue
 
 
-def add_to_human_review(ticket):
-    queue = get_human_review_queue()
+def get_llm_review_queue():
+    """Return tickets waiting for LLM triage."""
+    return _read_json_array(LLM_REVIEW_FILE)
+
+
+def add_to_llm_review(ticket):
+    """Append a ticket with a new ID and pending status to the LLM queue."""
     ticket_id = str(uuid4())
     ticket["id"] = ticket_id
-    queue.append(ticket)
-    _write_json_array(HUMAN_REVIEW_FILE, queue)
+    ticket["status"] = "pending_llm_review"
+
+    llm_review_queue = _read_json_array(LLM_REVIEW_FILE)
+    llm_review_queue.append(ticket.copy())
+    _write_json_array(LLM_REVIEW_FILE, llm_review_queue)
     return ticket_id
 
 
+def process_llm_review_ticket(ticket_id: str) -> dict:
+    """Run one queued ticket through LangGraph and persist its final outcome.
+
+    A failed LLM invocation leaves the ticket in the LLM queue so it can be
+    retried. Successful outcomes are moved to the assigned, rejected, or human
+    review collection.
+
+    Args:
+        ticket_id: Identifier of the queued ticket to process.
+
+    Returns:
+        The processed ticket, including its LLM decision and final status.
+
+    Raises:
+        LookupError: If no queued ticket has the requested ID.
+        RuntimeError: If all configured LLM providers fail.
+    """
+    queue = _read_json_array(LLM_REVIEW_FILE)
+    ticket_index = next(
+        (index for index, ticket in enumerate(queue) if ticket.get("id") == ticket_id),
+        None,
+    )
+    if ticket_index is None:
+        raise LookupError(f"Ticket {ticket_id} not found in LLM review queue")
+
+    from agents.langgraph_agents.ticket_triage_graph import ticket_triage_graph
+
+    ticket = queue[ticket_index]
+    decision = ticket_triage_graph.invoke({
+        "ticket": {
+            **ticket,
+            "allowed_assignment_groups": list(ASSIGNMENT_GROUPS),
+        }
+    })["decision"]
+    now = datetime.now(timezone.utc).isoformat()
+    ticket.update({
+        "llm_action": decision.action,
+        "llm_confidence": decision.confidence,
+        "llm_rationale": decision.rationale,
+        "reason": decision.rationale,
+        "processed_at": now,
+    })
+
+    if decision.action == "assign":
+        ticket.update({
+            "status": "assigned",
+            "assigned_at": now,
+            "assigned_by": "llm",
+            "assignment_group": decision.assignment_group,
+            "human_review_required": False,
+            "predicted_group": decision.assignment_group,
+        })
+        save_assigned_ticket(ticket.copy())
+    elif decision.action == "reject":
+        ticket.update({
+            "status": "rejected",
+            "rejected_at": now,
+            "rejected_by": "llm",
+            "rejection_reason": decision.rejection_reason,
+            "human_review_required": False,
+            "predicted_group": "Rejected",
+        })
+        rejected_tickets = _read_json_array(REJECTED_TICKETS_FILE)
+        if not any(item.get("id") == ticket_id for item in rejected_tickets):
+            rejected_tickets.append(ticket.copy())
+        _write_json_array(REJECTED_TICKETS_FILE, rejected_tickets)
+    else:
+        ticket.update({
+            "status": "human_review",
+            "assigned_by": "human",
+            "human_review_required": True,
+            "predicted_group": "Human Review",
+        })
+        human_review_queue = get_human_review_queue()
+        if not any(item.get("id") == ticket_id for item in human_review_queue):
+            human_review_queue.append(ticket.copy())
+        _write_json_array(HUMAN_REVIEW_FILE, human_review_queue)
+
+    queue.pop(ticket_index)
+    _write_json_array(LLM_REVIEW_FILE, queue)
+    return ticket
+
+
+def _submit_to_llm_review(ticket) -> dict:
+    """Queue and immediately process a ticket through LLM triage."""
+    ticket_id = add_to_llm_review(ticket)
+    return process_llm_review_ticket(ticket_id)
+
+
+def process_pending_llm_review_tickets():
+    """Process each ticket currently pending in the LLM review queue."""
+    results = []
+    for ticket in _read_json_array(LLM_REVIEW_FILE):
+        results.append(process_llm_review_ticket(ticket["id"]))
+    return results
+
+
 def save_assigned_ticket(ticket):
+    """Persist an assignment once, using its ticket ID as the idempotency key."""
     assigned_tickets = _read_json_array(ASSIGNED_TICKETS_FILE)
-    assigned_tickets.append(ticket)
-    _write_json_array(ASSIGNED_TICKETS_FILE, assigned_tickets)
-    if ticket.get("assignment_group"):
-        _store_assignment_group(ticket["assignment_group"])
+    if not any(item.get("id") == ticket.get("id") for item in assigned_tickets):
+        assigned_tickets.append(ticket)
+        _write_json_array(ASSIGNED_TICKETS_FILE, assigned_tickets)
 
 
 def save_human_review_training_example(text: str, assignment_group: str):
+    """Append a human correction for future assignment-model training."""
     file_exists = HUMAN_REVIEW_TRAINING_FILE.exists()
     write_header = not file_exists or HUMAN_REVIEW_TRAINING_FILE.stat().st_size == 0
 
@@ -252,10 +392,15 @@ def save_human_review_training_example(text: str, assignment_group: str):
 
 
 def get_assigned_tickets():
+    """Return all persisted assigned tickets."""
     return _read_json_array(ASSIGNED_TICKETS_FILE)
 
 
 def reject_assigned_ticket(ticket_id: str, reason: str | None = None):
+    """Move an assigned ticket to the rejected collection.
+
+    Returns ``None`` when no assigned ticket has the requested ID.
+    """
     assigned_tickets = _read_json_array(ASSIGNED_TICKETS_FILE)
     ticket_index = next(
         (index for index, ticket in enumerate(assigned_tickets) if ticket.get("id") == ticket_id),
@@ -284,6 +429,10 @@ def reject_assigned_ticket(ticket_id: str, reason: str | None = None):
 
 
 def reject_human_review_ticket(ticket_id: str, reason: str | None = None):
+    """Reject a ticket from human review and persist the optional reason.
+
+    Returns ``None`` when no human-review ticket has the requested ID.
+    """
     queue = get_human_review_queue()
     ticket_index = next(
         (index for index, ticket in enumerate(queue) if ticket.get("id") == ticket_id),
@@ -311,6 +460,7 @@ def reject_human_review_ticket(ticket_id: str, reason: str | None = None):
 
 
 def get_meta_data():
+    """Return configured metadata enriched with live queue and group counts."""
     metadata = {}
     if META_DATA_FILE.exists():
         with META_DATA_FILE.open("r", encoding="utf-8") as file:
@@ -324,62 +474,35 @@ def get_meta_data():
     else:
         training_examples = 0
 
-    stored_groups = _read_json_array(ASSIGNMENT_GROUPS_FILE)
-    if any(not isinstance(group, str) for group in stored_groups):
-        raise ValueError(f"Expected assignment group names in {ASSIGNMENT_GROUPS_FILE}")
-    assignment_groups = list(dict.fromkeys(
-        [str(group) for group in model.classes_] + stored_groups
-    ))
     metadata["ticket_counts"] = {
         "waiting_for_human_review": len(get_human_review_queue()),
+        "waiting_for_llm_review": len(_read_json_array(LLM_REVIEW_FILE)),
         "assigned": len(get_assigned_tickets()),
         "rejected": len(_read_json_array(REJECTED_TICKETS_FILE)),
         "human_review_training_examples": training_examples,
     }
-    metadata["assignment_groups"] = assignment_groups
+    metadata["assignment_groups"] = list(ASSIGNMENT_GROUPS)
     return metadata
 
 
 def update_classifier_model_accuracy(accuracy: float):
+    """Update the recorded accuracy while preserving other metadata fields."""
     metadata = get_meta_data()
     metadata["classifier_model_accuracy"] = accuracy
     with META_DATA_FILE.open("w", encoding="utf-8") as file:
         json.dump(metadata, file, indent=2)
 
 
-def _store_assignment_group(assignment_group: str):
-    assignment_group = assignment_group.strip()
-    if not assignment_group:
-        return
-
-    groups = _read_json_array(ASSIGNMENT_GROUPS_FILE)
-    if assignment_group not in groups:
-        groups.append(assignment_group)
-        _write_json_array(ASSIGNMENT_GROUPS_FILE, groups)
-
-
 def get_assignment_groups():
-    groups = _read_json_array(ASSIGNMENT_GROUPS_FILE)
-    if any(not isinstance(group, str) for group in groups):
-        raise ValueError(f"Expected assignment group names in {ASSIGNMENT_GROUPS_FILE}")
-
-    known_groups = [str(group) for group in model.classes_]
-    known_groups.extend(
-        ticket["assignment_group"]
-        for ticket in get_assigned_tickets()
-        if ticket.get("assignment_group")
-    )
-
-    for group in known_groups:
-        if group not in groups:
-            groups.append(group)
-
-    if groups != _read_json_array(ASSIGNMENT_GROUPS_FILE):
-        _write_json_array(ASSIGNMENT_GROUPS_FILE, groups)
-    return groups
+    """Return the approved assignment-group names."""
+    return list(ASSIGNMENT_GROUPS)
 
 
 def assign_human_review_ticket(ticket_id: str, assignment_group: str):
+    """Assign a human-reviewed ticket and record its correction for training.
+
+    Returns ``None`` when no ticket with the requested ID is awaiting review.
+    """
     queue = get_human_review_queue()
     ticket_index = next(
         (index for index, ticket in enumerate(queue) if ticket.get("id") == ticket_id),

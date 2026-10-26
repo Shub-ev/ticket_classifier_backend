@@ -2,9 +2,11 @@ __pycache__/
 *.py[cod]
 .venv/
 .idea/
+.env
 models/*.txt
 data/assigned_tickets.json
 data/human_review_queue.json
+data/llm_review_queue.json
 data/rejected_tickets.json
 data/cleaned_incidents.csv
 data/relevance_tickets.csv

@@ -1,3 +1,5 @@
+"""HTTP endpoints for ticket classification and triage queue management."""
+
 from fastapi import APIRouter, HTTPException
 from utils import TicketRequest, HumanReviewAssignment, AssignedTicketRejection
 from helper_functions import (
@@ -5,7 +7,9 @@ from helper_functions import (
     get_assignment_groups,
     get_assigned_tickets,
     get_human_review_queue,
+    get_llm_review_queue,
     get_meta_data,
+    process_pending_llm_review_tickets,
     predict_ticket_details,
     reject_assigned_ticket,
     reject_human_review_ticket,
@@ -17,14 +21,18 @@ import os
 
 triage_router = APIRouter(prefix="/triage", tags=["Triage"])
 
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEST_FILE = os.path.join(BASE_DIR, "data", "test_tickets.json")
 
 
-## This endpoint runs internal tests and return the results
 @triage_router.get("/tests/internal")
 def run_internal_tests():
+    """Evaluate configured test tickets and update recorded model accuracy.
 
+    This development endpoint also persists ticket assignments and review
+    outcomes; it is not a read-only health check.
+    """
     with open(TEST_FILE, "r", encoding="utf-8") as f:
         test_data = json.load(f)
 
@@ -39,7 +47,11 @@ def run_internal_tests():
         text = ticket["short_description"]
         expected = ticket["expected_group"]
 
-        prediction_result = predict_ticket_details(text, save_for_review=True)
+        prediction_result = predict_ticket_details(
+            text,
+            save_for_review=True,
+            save_assignment=True,
+        )
 
         prediction = prediction_result["predicted_group"]
         confidence = prediction_result["confidence"]
@@ -92,6 +104,7 @@ def run_internal_tests():
 
 @triage_router.post("/tests/")
 def predict_ticket(ticket: TicketRequest):
+    """Classify a ticket description and persist the resulting ticket state."""
     return predict_ticket_details(
         ticket.short_description,
         save_for_review=True,
@@ -101,11 +114,25 @@ def predict_ticket(ticket: TicketRequest):
 
 @triage_router.get("/human_review")
 def get_tickets_for_human_review():
+    """List tickets awaiting a human assignment or rejection decision."""
     return get_human_review_queue()
+
+
+@triage_router.get("/llm_review")
+def get_tickets_for_llm_review():
+    """List tickets still waiting for LLM processing."""
+    return get_llm_review_queue()
+
+
+@triage_router.post("/llm_review/process")
+def process_llm_review_queue():
+    """Retry processing for each ticket currently in the LLM review queue."""
+    return process_pending_llm_review_tickets()
 
 
 @triage_router.post("/human_review")
 def assign_human_review_ticket_endpoint(assignment: HumanReviewAssignment):
+    """Assign a human-review ticket to an approved assignment group."""
     if not assignment.assignment_group.strip():
         raise HTTPException(status_code=422, detail="assignment_group must not be empty")
 
@@ -120,6 +147,7 @@ def assign_human_review_ticket_endpoint(assignment: HumanReviewAssignment):
 
 @triage_router.post("/human_review/reject")
 def reject_human_review_ticket_endpoint(rejection: AssignedTicketRejection):
+    """Reject a human-review ticket, returning 404 when it is not queued."""
     ticket = reject_human_review_ticket(rejection.id, rejection.reason)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found in human review queue")
@@ -128,11 +156,13 @@ def reject_human_review_ticket_endpoint(rejection: AssignedTicketRejection):
 
 @triage_router.get("/assigned")
 def get_assigned_tickets_endpoint():
+    """List assigned tickets."""
     return get_assigned_tickets()
 
 
 @triage_router.post("/assigned/reject")
 def reject_assigned_ticket_endpoint(rejection: AssignedTicketRejection):
+    """Reject an assigned ticket, returning 404 when it is not assigned."""
     ticket = reject_assigned_ticket(rejection.id, rejection.reason)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found in assigned tickets")
@@ -141,20 +171,19 @@ def reject_assigned_ticket_endpoint(rejection: AssignedTicketRejection):
 
 @triage_router.get("/assignment_groups")
 def get_assignment_groups_endpoint():
+    """List the assignment groups accepted by the API."""
     return get_assignment_groups()
 
 
 @triage_router.get("/meta_data")
 def get_meta_data_endpoint():
+    """Return model descriptions, current queue counts, and allowed groups."""
     return get_meta_data()
 
 
 
 @triage_router.get("/tests/internal_tests")
 def get_internal_test_cases():
-    """
-    Returns the JSON file used for testing
-    """
-
+    """Return the test-case dataset used by the internal evaluation endpoint."""
     with open(TEST_FILE, "r", encoding="utf-8") as f:
         return json.load(f)

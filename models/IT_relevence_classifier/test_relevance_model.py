@@ -1,3 +1,4 @@
+"""Run interactive predictions with the saved relevance classifier."""
 
 import joblib
 from pathlib import Path
@@ -10,6 +11,7 @@ if not MODEL_FILE.exists():
         f"Model not found: {MODEL_FILE}. Train the model first."
     )
 
+# Load the fitted model once, then reuse it for each interactive example.
 model = joblib.load(MODEL_FILE)
 
 print("IT Ticket Relevance Classifier")

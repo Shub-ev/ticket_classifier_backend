@@ -1,5 +1,5 @@
 {
-  "classifier_model_accuracy": 95.0,
+  "classifier_model_accuracy": 90.0,
   "models": {
     "relevance_classifier": {
       "name": "IT relevance classifier",
@@ -11,13 +11,14 @@
       "name": "Assignment group classifier",
       "minimum_confidence_percent": 80.0,
       "minimum_vocabulary_coverage_percent": 20.0,
-      "description": "Automatically assigns high-confidence relevant tickets; lower-confidence tickets require human review."
+      "description": "Automatically assigns high-confidence relevant tickets; low-confidence tickets are triaged by the LLM and sent for human review only when uncertain."
     }
   },
   "ticket_statuses": {
-    "human_review": "Waiting for a human to choose an assignment group.",
+    "llm_review": "Being classified by the LLM into an assignment group, rejection, or human review.",
+    "human_review": "Waiting for a human to choose an assignment group after automated triage.",
     "assigned": "Assigned to an assignment group.",
-    "rejected": "Rejected by a client and excluded from assignment-group training data."
+    "rejected": "Rejected by the LLM or a client and excluded from assignment-group training data."
   },
   "client_actions": {
     "reject_assigned_ticket": {
@@ -36,5 +37,20 @@
         "reason": "Optional reason for rejection"
       }
     }
-  }
+  },
+  "ticket_counts": {
+    "waiting_for_human_review": 3,
+    "waiting_for_llm_review": 0,
+    "assigned": 32,
+    "rejected": 1,
+    "human_review_training_examples": 3
+  },
+  "assignment_groups": [
+    "DWE Remote AV conference Support",
+    "DWE Remote Support Compute HW_SW",
+    "DWE Remote Support M365",
+    "Low Volume Support Groups",
+    "TCS APEX Centre L1 Support",
+    "TCS Service Desk"
+  ]
 }

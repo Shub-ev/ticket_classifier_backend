@@ -1,3 +1,8 @@
+"""Restore model artifacts encoded as base64 text files.
+
+Run this utility from the directory containing the encoded model files.
+"""
+
 import base64
 
 files = [
